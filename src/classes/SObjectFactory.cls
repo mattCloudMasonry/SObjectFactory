@@ -1,184 +1,320 @@
+/**
+ *  @project SObjectBuilder
+ *  @group SObjectBuilder
+ *  @description This class can be used as a low level API to build or create SObjects of any given type. It provides
+ *      the core functionality behind SObjectBuilder, and can be used in cases where SObjectBuilder is too complicated
+ *      or overkill. Similarly to SObjectBuilder, this class can accept IFieldProviders in place of primitives when
+ *      assigning fields.
+ *  @example
+ *      // Create a test account.
+ *      Account testAccount = (Account)SObjectFactory.create(Account.sObjectType);
+ *
+ *      // Create a test opportunity and assign its parent to the test account.
+ *      Opportunity testOpportunity = (Opportunity)SObjectFactory.create(Opportunity.sObjectType,
+ *          Opportunity.AccountId, testAccount);
+ *
+ *      // Build 20 "Product" olis assigned to the test opportunity.
+ *      List<OpportunityLineItem> testOppLineItems = SObjectFactory.build(20, OpportunityLineItem.sObjectType,
+ *          'Product', OpportunityLineItem.OpportunityId, testOpportunity);
+ */
 @IsTest
 public class SObjectFactory
 {
-    public static User ADMIN_USER
-    {
-        get
-        {
-            if (ADMIN_USER == null)
+    private static final String CREATE_ERROR = 'SObjectFactory Create failed. State: {0}, Cause: {1}';
+    public class SObjectFactoryException extends Exception { }
+
+    /**
+     *  @description Gets a user from the organization which is a system administrator.
+     */
+    @testVisible
+    public static User ADMIN_USER {
+        get {
+            if (ADMIN_USER == null) {
                 ADMIN_USER = [
-                    SELECT Id FROM User WHERE IsActive = true
-                    AND Profile.Name = 'Counsyl System Admin'
+                    SELECT Id FROM User
+                    WHERE Profile.PermissionsModifyAllData = true
+                    AND IsActive = true
                     LIMIT 1
                 ];
+            }
             return ADMIN_USER;
         }
         private set;
     }
-    public static Boolean isProduction
-    {
-        get
-        {
-            if (isProduction == null)
-                isProduction = ![SELECT IsSandbox FROM Organization].IsSandbox;
-            return isProduction;
+
+    public static SObject create(Schema.SObjectType objectType) { return create(1, objectType)[0]; }
+    public static SObject build(Schema.SObjectType objectType) { return build(1, objectType)[0]; }
+
+    public static SObject create(Schema.SObjectType objectType, String template) { return create(1, objectType, template)[0]; }
+    public static SObject build(Schema.SObjectType objectType, String template) { return build(1, objectType, template)[0]; }
+
+    public static List<SObject> create(Integer recordCount, Schema.SObjectType objectType) {
+        return create(recordCount, objectType, (String)null /*template*/);
+    }
+    public static List<SObject> build(Integer recordCount, Schema.SObjectType objectType) {
+        return build(recordCount, objectType, (String)null /*template*/);
+    }
+
+    public static List<SObject> create(Integer recordCount, Schema.SObjectType objectType, String template) {
+        return create(new SObjectFactoryState(recordCount, objectType, template), null /*fieldToValue*/);
+    }
+    public static List<SObject> build(Integer recordCount, Schema.SObjectType objectType, String template) {
+        return build(new SObjectFactoryState(recordCount, objectType, template), null /*fieldToValue*/);
+    }
+
+    public static SObject create(Schema.SObjectType objectType, Schema.SObjectField field, Object value) {
+        return create(1, objectType, field, value)[0];
+    }
+    public static SObject build(Schema.SObjectType objectType, Schema.SObjectField field, Object value) {
+        return build(1, objectType, field, value)[0];
+    }
+
+    public static SObject create(Schema.SObjectType objectType, String template, Schema.SObjectField field, Object value) {
+        return create(1, objectType, template, field, value)[0];
+    }
+    public static SObject build(Schema.SObjectType objectType, String template,  Schema.SObjectField field, Object value) {
+        return build(1, objectType, template, field, value)[0];
+    }
+
+    public static List<SObject> create(Integer recordCount, Schema.SObjectType objectType, Schema.SObjectField field, Object value) {
+        return create(recordCount, objectType, (String)null /*template*/, field, value);
+    }
+    public static List<SObject> build(Integer recordCount, Schema.SObjectType objectType, Schema.SObjectField field, Object value) {
+        return build(recordCount, objectType, (String)null /*template*/, field, value);
+    }
+
+    /**
+     *  @description Builds and inserts one or more records of the given SObjectType, using the required fields cache.
+     *  @param recordCount (Optional) The number of records to create. This will be 1 if not set.
+     *  @param sObjectType The type of SObject to create.
+     *  @param template (Optional) The template to use when creating these records.
+     *  @param field (Optional) Assigns one field on the SObject to the passed in value.
+     *  @param value (Optional) Assignes the field defined in "field" to this value. This could be a primitive, list,
+     *      SObject, or IFieldProvider.
+     *  @return If recordCount is set, a List<SObject> of records created. Otherwise, a single created SObject.
+     */
+    public static List<SObject> create(Integer recordCount, Schema.SObjectType objectType, String template, Schema.SObjectField field, Object value) {
+        return create(new SObjectFactoryState(recordCount, objectType, template), new Map<Schema.SObjectField, Object> { field => value });
+    }
+    /**
+     *  @description Builds but does not insert one or more records of the given SObjectType, using the required fields
+     *      cache.
+     *  @param recordCount (Optional) The number of records to create. This will be 1 if not set.
+     *  @param sObjectType The type of SObject to create.
+     *  @param template (Optional) The template to use when creating these records.
+     *  @param field (Optional) Assigns one field on the SObject to the passed in value.
+     *  @param value (Optional) Assignes the field defined in "field" to this value. This could be a primitive, list,
+     *      SObject, or IFieldProvider.
+     *  @return If recordCount is set, a List<SObject> of records built. Otherwise, a single built SObject.
+     */
+    public static List<SObject> build(Integer recordCount, Schema.SObjectType objectType, String template, Schema.SObjectField field, Object value) {
+        return build(new SObjectFactoryState(recordCount, objectType, template), new Map<Schema.SObjectField, Object> { field => value });
+    }
+
+    /**
+     *  @description Builds and inserts one or more records using the properties defined in the SObjectFactory state
+     *      which is passed in. This method should not be called directly, and instead should only be used by the
+     *      SObjectBuilder class.
+     *  @param state The FactoryState to use when creating these records.
+     *  @param fieldToValue The map of SObjectField to Object that defines which fields are assigned to which values.
+     *      The values can be primitives, SObjects, Lists, or IFieldProviders.
+     *  @return a List<SObject> of the records created.
+     */
+    public static List<SObject> create(SObjectFactoryState state, Map<Schema.SObjectField, Object> fieldToValue) {
+        List<SObject> records = build(state, fieldToValue);
+        try {
+            insert records;
+            return records;
+        } catch (DmlException ex) {
+            String msg = String.format(CREATE_ERROR, new List<String>{ state.toString(), ex.getMessage() });
+            ex.setMessage(msg);
+            throw ex;
         }
-        private set;
     }
 
-    public static Integer getRecordThreshold()
-    {
-        return isProduction ? 5 : Limits.getLimitQueries() + 1;
-    }
+    /**
+     *  @description Builds but does not insert one or more records using the properties defined in the SObjectFactory
+     *      state which is passed in. This method should not be called directly, and instead should only be used by the
+     *      SObjectBuilder class.
+     *  @param state The FactoryState to use when building these records.
+     *  @param fieldToValue The map of SObjectField to Object that defines which fields are assigned to which values.
+     *      The values can be primitives, SObjects, Lists, or IFieldProviders.
+     *  @return a List<SObject> of the records built.
+     */
+    public static List<SObject> build(SObjectFactoryState state, Map<Schema.SObjectField, Object> fieldToValue) {
+        Map<Schema.SObjectField, Object> fieldMap = RequiredFieldsCache.get(state.sObjectType, state.template);
+        if (fieldToValue != null){
+            fieldMap.putAll(fieldToValue);
+        }
+        initializeDynamicProviders(fieldMap, state);
 
-    // no fields
-    public static SObject build(SObjectType sObjectType) { return build(sObjectType, 1)[0]; }
-    public static SObject create(SObjectType sObjectType) { return create(sObjectType, 1)[0]; }
-    
-    public static List<SObject> build(SObjectType sObjectType, Integer count)
-    {
-        return build(sObjectType, count, /*fieldToValue*/ null);
-    }
-    public static List<SObject> create(SObjectType sObjectType, Integer count)
-    {
-        return create(sObjectType, count, /*fieldToValue*/ null);
-    }
-    
-    // one field
-    public static SObject build(SObjectType sObjectType, SObjectField field, Object value)
-    {
-        return build(sObjectType, 1, field, value)[0];
-    }
-    public static SObject create(SObjectType sObjectType, SObjectField field, Object value)
-    {
-        return create(sObjectType, 1, field, value)[0];
-    }
-    
-    public static List<SObject> build(SObjectType sObjectType, Integer count, SObjectField field, Object value)
-    {
-        return build(sObjectType, count, new Map<SObjectField, Object> { field => value });
-    }
-    public static List<SObject> create(SObjectType sObjectType, Integer count, SObjectField field, Object value)
-    {
-        return create(sObjectType, count, new Map<SObjectField, Object> { field => value });
-    }
-    
-    // all fields
-    public static List<SObject> build(
-        SObjectType sObjectType, Integer count,
-        Map<SObjectField, Object> fieldToValue
-    )
-    {
-        Map<SObjectField, Object> fields = RequiredFieldsCache.get(sObjectType);
-        if (fieldToValue != null) fields.putAll(fieldToValue);
-        
         List<SObject> records = new List<SObject>();
-        while (records.size() < count)
-        {
-            SObject record = sObjectType.newSObject();
-            for (SObjectField field : fields.keySet())
-            {
-                Object value = fields.get(field);
-                if (value instanceOf IFieldProvider)
-                    value = ((IFieldProvider)value).getValue();
-                record.put(field, value);
-            }
-            records.add(record);
+        for (Integer i = 0; i < state.count; i++) {
+            records.add(buildRecord(state.sObjectType, fieldMap));
         }
         return records;
     }
-    public static List<SObject> create(
-        SObjectType sObjectType, Integer count,
-        Map<SObjectField, Object> fieldToValue
-    )
-    {
-        List<SObject> records = build(sObjectType, count, fieldToValue);
-        insert records;
+
+    /**
+     *  @description Metabuilds a record with JSON methods, allowing typically read-only fields to be set. Similar to
+     *      Build, these records use the properties defined in the SObjectFactory state which is passed in. This method
+     *      should not be called directly, and instead should only be used by the SObjectBuilder class.
+     *  @param state The FactoryState to use when building these records.
+     *  @param fieldToValue The map of SObjectField to Object that defines which fields are assigned to which values.
+     *      The values can be primitives, SObjects, Lists, or IFieldProviders.
+     *  @return a List<SObject> of the records built.
+     */
+    public static List<SObject> metaBuild(SObjectFactoryState state, Map<Schema.SObjectField, Object> fieldToValue) {
+        System.Type recordClass = System.Type.forName(String.valueOf(state.sObjectType));
+
+        Map<Schema.SObjectField, Object> fieldMap = RequiredFieldsCache.get(state.sObjectType, state.template);
+        if (fieldToValue != null) {
+            fieldMap.putAll(fieldToValue);
+        }
+        initializeDynamicProviders(fieldMap, state);
+
+        List<SObject> records = new List<SObject>();
+        for (Integer i = 0; i < state.count; i++) {
+            records.add(metaBuildRecord(recordClass, fieldMap));
+        }
         return records;
     }
-    
-    // providers
-    public static IFieldProvider provideStandardProfile()
-    {
-        return new SObjectFieldProviders.QueryParentProvider(
-            'SELECT Id FROM Profile WHERE Name = \'Standard User\' LIMIT 1'
-        );
-    }
-    
-    public static IFieldProvider provideUniqueNumber()
-    {
-        return new SObjectFieldProviders.UniqueNumberProvider();
-    }
-    public static IFieldProvider provideUniqueNumber(Integer start)
-    {
-        return new SObjectFieldProviders.UniqueNumberProvider(start);
+
+    @testVisible
+    private static SObject buildRecord(Schema.SObjectType sObjectType, Map<Schema.SObjectField, Object> fieldMap) {
+        Id recordId;
+        SObject record = sObjectType.newSObject();
+
+        for (Schema.SObjectField field : fieldMap.keySet()) {
+            if (String.valueOf(field) == 'Id') {
+                recordId = (Id)handleProviders(fieldMap.get(field));
+            } else {
+                record.put(field, handleProviders(fieldMap.get(field)));
+            }
+        }
+
+        // Id is set last to prevent a -bug- feature where setting the Id on a record will make any non-reparentable
+        // master detail relationships read-only.
+        record.Id = recordId;
+        return record;
     }
 
-    public static IFieldProvider provideUniqueDate()
-    {
-        return new SObjectFieldProviders.UniqueDateProvider();
-    }
-    public static IFieldProvider provideUniqueDate(Date startDate)
-    {
-        return new SObjectFieldProviders.UniqueDateProvider(startDate);
-    }
-
-    public static IFieldProvider provideUniqueString()
-    {
-        return new SObjectFieldProviders.UniqueStringProvider();
-    }
-    public static IFieldProvider provideUniqueString(String base)
-    {
-        return new SObjectFieldProviders.UniqueStringProvider(base);
-    }
-    
-    public static IFieldProvider provideUniqueFixedLengthString(Integer length)
-    {
-        return new SObjectFieldProviders.UniqueFixedLengthStringProvider(length);
-    }
-    public static IFieldProvider provideUniqueFixedLengthString(String base, Integer length)
-    {
-        return new SObjectFieldProviders.UniqueFixedLengthStringProvider(base, length);
+    @testVisible
+    private static SObject metaBuildRecord(System.Type sObjectType, Map<Schema.SObjectField, Object> fieldMap) {
+        Map<Schema.SObjectField, Object> metaFieldToValue = new Map<Schema.SObjectField, Object>();
+        for (Schema.SObjectField field : fieldMap.keySet()){
+            metaFieldToValue.put(field, handleProviders(fieldMap.get(field)));
+        }
+        return (SObject)JSON.deserialize(JSON.serialize(metaFieldToValue), sObjectType);
     }
 
-    public static IFieldProvider provideDummyId(SObjectType sObjectType)
-    {
-        return new SObjectFieldProviders.DummyIdProvider(sObjectType);
+    @testVisible
+    private static void initializeDynamicProviders(Map<Schema.SObjectField, Object> fieldToValue, SObjectFactoryState state) {
+        Object value;
+        for (Schema.SObjectField field : fieldToValue.keySet()) {
+            value = fieldToValue.get(field);
+            if (value != null) {
+                if (value instanceof IDynamicProvider) {
+                    ((IDynamicProvider)value).initialize(state, field);
+                } else if (value instanceof List<Object>) {
+                    fieldToValue.put(field, new SObjectFieldProviders.ListProvider((List<Object>)value));
+                }
+            }
+        }
     }
 
-    public static IFieldProvider provideGenericParent(SObjectType sObjectType)
-    {
-        return new SObjectFieldProviders.GenericParentProvider(sObjectType);
-    }
-    public static IFieldProvider provideGenericParent(SObjectType sObjectType, SObjectField field, Object value)
-    {
-        return new SObjectFieldProviders.GenericParentProvider(sObjectType, field, value);
-    }
-
-    public static IFieldProvider provideList(List<Object> values)
-    {
-        return new SObjectFieldProviders.ListProvider(values);
-    }
-
-    public static IFieldProvider provideParents(SObjectType sObjectType, Integer count)
-    {
-        return new SObjectFieldProviders.MultiParentProvider(SObjectFactory.create(sObjectType, count));
-    }
-    public static IFieldProvider provideParents(List<SObject> parents)
-    {
-        return new SObjectFieldProviders.MultiParentProvider(parents);
-    }
-    public static IFieldProvider provideParents(Set<Id> parentIds)
-    {
-        return new SObjectFieldProviders.MultiParentProvider(parentIds);
+    @testVisible
+    private static Object handleProviders(Object value) {
+        if (value != null) {
+            if (value instanceof IFieldProvider) {
+                value = ((IFieldProvider)value).getValue();
+            }
+            if (value instanceof SObject) {
+                value = ((SObject)value).Id;
+            }
+        }
+        return value;
     }
 
-    public static IFieldProvider provideQueriedParent(String query)
-    {
-        return new SObjectFieldProviders.QueryParentProvider(query);
+
+    /** @deprecated */
+    public static SObject create(Schema.SObjectType objectType, Map<Schema.SObjectField, Object> fieldToValue) {
+        return create(1, objectType, fieldToValue)[0];
     }
-    public static IFieldProvider provideQueriedParent(SObjectType sObjectType)
-    {
-        return new SObjectFieldProviders.QueryParentProvider(sObjectType);
+    /** @deprecated */
+    public static SObject build(Schema.SObjectType objectType, Map<Schema.SObjectField, Object> fieldToValue) {
+        return build(1, objectType, fieldToValue)[0];
     }
+    /** @deprecated */
+    public static SObject create(Schema.SObjectType objectType, String template, Map<Schema.SObjectField, Object> fieldToValue) {
+        return create(1, objectType, template, fieldToValue)[0];
+    }
+    /** @deprecated */
+    public static SObject build(Schema.SObjectType objectType, String template, Map<Schema.SObjectField, Object> fieldToValue) {
+        return build(1, objectType, template, fieldToValue)[0];
+    }
+    /** @deprecated */
+    public static List<SObject> create(Integer recordCount, Schema.SObjectType objectType, Map<Schema.SObjectField, Object> fieldToValue) {
+        return create(recordCount, objectType, null, fieldToValue);
+    }
+    /** @deprecated */
+    public static List<SObject> build(Integer recordCount, Schema.SObjectType objectType, Map<Schema.SObjectField, Object> fieldToValue) {
+        return build(recordCount, objectType, null, fieldToValue);
+    }
+    /** @deprecated */
+    public static List<SObject> create(Integer recordCount, Schema.SObjectType objectType, String template, Map<Schema.SObjectField, Object> fieldToValue) {
+        return create(new SobjectFactoryState(recordCount, objectType, template), fieldToValue);
+    }
+    /** @deprecated */
+    public static List<SObject> build(Integer recordCount, Schema.SObjectType objectType, String template, Map<Schema.SObjectField, Object> fieldToValue) {
+        return build(new SobjectFactoryState(recordCount, objectType, template), fieldToValue);
+    }
+
+    /** @deprecated */
+    public static SObject metaBuild(Schema.SObjectType objectType) { return metaBuild(1, objectType)[0]; }
+    /** @deprecated */
+    public static SObject metaBuild(Schema.SObjectType objectType, String template) { return metaBuild(1, objectType, template)[0]; }
+    /** @deprecated */
+    public static List<SObject> metaBuild(Integer recordCount, Schema.SObjectType objectType) {
+        return metaBuild(recordCount, objectType, null, new Map<Schema.SObjectField, Object>());
+    }
+    /** @deprecated */
+    public static List<SObject> metaBuild(Integer recordCount, Schema.SObjectType objectType, String template) {
+        return metaBuild(recordCount, objectType, template, new Map<Schema.SObjectField, Object>());
+    }
+    /** @deprecated */
+    public static SObject metaBuild(Schema.SObjectType objectType, Schema.SObjectField field, Object value) {
+        return metaBuild(objectType, new Map<Schema.SObjectField, Object> { field => value });
+    }
+    /** @deprecated */
+    public static List<SObject> metaBuild(Integer recordCount, Schema.SObjectType objectType, Schema.SObjectField field, Object value) {
+        return metaBuild(recordCount, objectType, new Map<Schema.SObjectField, Object> { field => value });
+    }
+    /** @deprecated */
+    public static SObject metaBuild(Schema.SObjectType objectType, String template,  Schema.SObjectField field, Object value) {
+        return metaBuild(objectType, template, new Map<Schema.SObjectField, Object> { field => value });
+    }
+    /** @deprecated */
+    public static SObject metaBuild(Schema.SObjectType objectType, Map<Schema.SObjectField, Object> fieldToValue) {
+        return metaBuild(1, objectType, fieldToValue)[0];
+    }
+    /** @deprecated */
+    public static SObject metaBuild(Schema.SObjectType objectType, String template, Map<Schema.SObjectField, Object> fieldToValue) {
+        return metaBuild(1, objectType, template, fieldToValue)[0];
+    }
+    /** @deprecated */
+    public static List<SObject> metaBuild(Integer recordCount, Schema.SObjectType objectType, String template, Schema.SObjectField field, Object value) {
+        return metaBuild(recordCount, objectType, template, new Map<Schema.SObjectField, Object> { field => value });
+    }
+    /** @deprecated */
+    public static List<SObject> metaBuild(Integer recordCount, Schema.SObjectType objectType, Map<Schema.SObjectField, Object> fieldToValue) {
+        return metaBuild(recordCount, objectType, null, fieldToValue);
+    }
+    /** @deprecated */
+    public static List<SObject> metaBuild(Integer recordCount, Schema.SObjectType objectType, String template, Map<Schema.SObjectField, Object> fieldToValue) {
+        return metaBuild(new SobjectFactoryState(recordCount, objectType, template), fieldToValue);
+    }
+
+    // <Legacy Methods> (If Installed)
+    // End Legacy Methods
 }
